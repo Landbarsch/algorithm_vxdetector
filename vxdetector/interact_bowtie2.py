@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 
 bowtie2_path = shutil.which('bowtie2')
 if bowtie2_path is None:
@@ -41,7 +42,7 @@ def buildbowtie2(path):
         # if a indexfile is missing a new index is build
 
 
-def mapbowtie2(fasta_file, read2_file, path, temp_path, paired):
+def mapbowtie2(fasta_file, read2_file, path, temp_path, paired, bowtie2_params=None):    
     r'''Maps reads against index
 
     This function maps read files against a previously build index.
@@ -82,39 +83,63 @@ def mapbowtie2(fasta_file, read2_file, path, temp_path, paired):
         file being skipped (if a directory was given).
 
     '''
+    
+# Define the path to the Bowtie2 index
     index_path = f'{path}Indexed_bt2/bowtie2'
-    if os.path.exists(f'{index_path}.1.bt2') is False:
-        raise FileNotFoundError(f'No Index files found under "{index_path}"')
-        # raises an Exception if the Index files cannot be found
+    
+    # Check if the index files exist
+    if not os.path.exists(f'{index_path}.1.bt2'):
+        raise FileNotFoundError(f'No index files found under "{index_path}"')
+
+    # Define paths for log files
     log_path = f'{temp_path}bowtie2.log'
     bed_logpath = f'{temp_path}bed.log'
-    # declares various filepaths
     Error = False
-    if paired is True:
+    
+    # Create the base Bowtie2 command
+    bowtie2_base_cmd = [bowtie2_path, '-x', index_path, '--fast']
+    
+    # Add additional Bowtie2 parameters if provided
+    if bowtie2_params:
+        bowtie2_base_cmd += bowtie2_params
+
+    # If the reads are paired, use paired-end processing
+    if paired:
         aligned_path = f'{temp_path}paired.bed'
-        cmd = f'{bowtie2_path} -x {index_path} -1 {fasta_file} \
-                -2 {read2_file} --fast 2> {log_path} | \
-                {samtools_path} view -b -q 30 -S -F 4 \
-                | {bedtools_path} bamtobed -bedpe -i stdin > {aligned_path} \
-                2> {bed_logpath}'
-        # Should a backward read be found both files will be given to bowtie2.
-        # After converting .sam to .bam a conversion to .bed is done to
-        # properly mate the pairs
+        bowtie2_base_cmd += ['-1', fasta_file, '-2', read2_file]
+        
+        # Create the pipeline for Bowtie2 -> Samtools -> Bedtools
+        cmd_bowtie = bowtie2_base_cmd
+        cmd_samtools = [samtools_path, 'view', '-b', '-q', '30', '-S', '-F', '4']
+        cmd_bedtools = [bedtools_path, 'bamtobed', '-bedpe', '-i', 'stdin']
+
+        # Run the subprocess pipeline, writing output directly to files
+        with open(log_path, 'w') as log_file, open(bed_logpath, 'w') as bed_log, open(aligned_path, 'w') as output_file:
+            # Start Bowtie2 process
+            bowtie_process = subprocess.Popen(cmd_bowtie, stderr=log_file, stdout=subprocess.PIPE)
+            # Pass output of Bowtie2 to Samtools
+            samtools_process = subprocess.Popen(cmd_samtools, stdin=bowtie_process.stdout, stdout=subprocess.PIPE)
+            # Pass output of Samtools to Bedtools and write to file
+            subprocess.run(cmd_bedtools, stdin=samtools_process.stdout, stdout=output_file, stderr=bed_log)
+        
+    # If the reads are unpaired, process them without Bedtools
     else:
         aligned_path = f'{temp_path}unpaired.bam'
-        cmd = f'{bowtie2_path} -x {index_path} -q -U {fasta_file} \
-                 --fast 2> {log_path} | {samtools_path} view -b -q 30 -S -F 4 \
-                 -o {aligned_path}'
-        # Should no backward read be found it will just use the forward
-        # read and does an alignment followed by a pipe to convert
-        # the bowtie2 output .sam to a .bam file
-    os.system(cmd)
+        bowtie2_base_cmd += ['-U', fasta_file]
+        
+        # Create the pipeline for Bowtie2 -> Samtools
+        cmd_bowtie = bowtie2_base_cmd
+        cmd_samtools = [samtools_path, 'view', '-b', '-q', '30', '-S', '-F', '4', '-o', aligned_path]
+
+        # Run the Bowtie2 and Samtools subprocess pipeline
+        with open(log_path, 'w') as log_file:
+            # Start Bowtie2 process and pipe output to Samtools
+            bowtie_process = subprocess.Popen(cmd_bowtie, stderr=log_file, stdout=subprocess.PIPE)
+            subprocess.run(cmd_samtools, stdin=bowtie_process.stdout)
+
+    # Check for errors in the Bowtie2 log file
     with open(log_path, 'r') as log:
-        lines = log.readlines()
-        try:
-            int(lines[0].split()[0])
-        except ValueError:
+        if any("error" in line.lower() for line in log):
             Error = True
-        # Checks if bowtie2 exited with an error
 
     return aligned_path, Error
